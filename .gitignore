@@ -1,0 +1,13 @@
+# secrets - never commit
+.env
+kite_token.json
+*token*.json
+# run artifacts
+planned_orders_*.csv
+placed_orders_*.csv
+fills_log.csv
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

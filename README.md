@@ -3,7 +3,7 @@
 > **For algo vendors & brokers getting empanelment-ready:** this is the kind of
 > SEBI-compliant execution architecture I implement as a service — static-IP
 > routing, marketable protective limits, Algo-ID/audit logging, and the
-> empanelment doc pack. Free gap audit → **AyanJain259@gmail.com**.
+> empanelment doc pack. Free gap audit → **DM [@Finance_Broski](https://x.com/Finance_Broski)**.
 
 A small, safe-by-default order-execution layer for Indian equities on
 [Kite Connect](https://kite.trade/), built to sit inside the **personal-use lane**
@@ -48,3 +48,12 @@ tests. `RUNBOOK.md` is the monthly procedure. `core/config.py` loads creds from 
 Token and API secret live in `.env` / a local token file, both gitignored; the
 token file is written owner-only and expires daily. This is the personal tier — a
 production vendor deployment uses managed secrets, which is part of the service.
+
+## Need this set up for your own bot?
+
+I do SEBI-compliant algo deployments end-to-end — static IP, Mumbai VPS, your bot
+deployed, daily-token login handled, and verified with a live test order. You keep
+full control of your account; I only configure the infrastructure — no strategies,
+no advice, no fund access. Brokers: Zerodha (Kite Connect), Angel One, Upstox, Dhan, Fyers.
+
+**→ DM [@Finance_Broski](https://x.com/Finance_Broski).**

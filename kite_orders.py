@@ -18,6 +18,7 @@ Design:
 - Rate limit ~0.8 orders/sec - an order of magnitude under SEBI's 10/sec line.
 """
 import argparse
+import json
 import math
 import os
 import sys
@@ -100,6 +101,40 @@ def slice_qty(qty: int, ref: float, max_value: float) -> list:
     return [per] * n_full + ([rem] if rem else [])
 
 
+def _run_id(ts: str) -> str:
+    """Compact, day-unique id (base36 of the timestamp digits) for order tags, so the tag
+    stays inside Kite's 20-char alphanumeric `tag` budget."""
+    n, s = int(ts.replace("_", "")), ""
+    while n:
+        n, r = divmod(n, 36)
+        s = "0123456789abcdefghijklmnopqrstuvwxyz"[r] + s
+    return s or "0"
+
+
+def slice_tag(run_id: str, i: int) -> str:
+    """Deterministic, unique-per-slice Kite order tag (<=20 alphanumeric chars).
+
+    The tag is the CRASH-RECOVERY key: it is assigned and journaled to disk BEFORE the order is
+    placed, so if the place_order RESPONSE (the order_id) is lost to a disconnect/crash, the order
+    still exists at the broker and can be found by matching the order book on this tag. order_id is
+    only the fast in-session join key; tag is what survives a lost response."""
+    return f"rb{run_id}{i:04d}"[:20]
+
+
+def _journal(journal, rec: dict) -> None:
+    """Append-only crash-safe record: the INTENT (with tag) is written before placement and the
+    RESULT (with order_id) after, each flushed+fsync'd. A crash therefore loses at most the single
+    in-flight slice -- and even that one already has its tag on disk to recover by."""
+    if journal is None:
+        return
+    journal.write(json.dumps(rec) + "\n")
+    journal.flush()
+    try:
+        os.fsync(journal.fileno())
+    except (OSError, AttributeError, ValueError):             # e.g. StringIO in tests
+        pass
+
+
 def open_order_blockers(orderbook: list, symbols: set) -> set:
     """Symbols that already have a LIVE (non-terminal) order in today's book.
     Placing again would double up: holdings reflect fills, not still-open orders."""
@@ -121,20 +156,29 @@ def fetch_holdings(kite) -> dict:
 
 
 def place_all(kite, orders: list, band: float, max_value: float,
-              sleeper=time.sleep) -> list:
-    placed = []
+              run_id: str = "", journal=None, sleeper=time.sleep) -> list:
+    """Place sliced protective-LIMIT orders. Each slice gets a unique deterministic `tag` that is
+    journaled BEFORE placement and sent on the order, so a lost response / crash never loses the
+    order -- kite_reconcile recovers it from the order book by tag. order_id = in-session join key;
+    tag = crash-recovery key."""
+    placed, i = [], 0
     for o in orders:
         px = limit_price(o["side"], o["ref"], band)
         for q in slice_qty(o["qty"], o["ref"], max_value):
+            tag = slice_tag(run_id, i)
+            i += 1
+            rec = {**o, "qty": q, "limit": px, "tag": tag, "order_id": "", "status": "PENDING"}
+            _journal(journal, rec)                            # persist INTENT (+tag) before placing
             try:
                 oid = kite.place_order(
                     variety="regular", exchange="NSE", tradingsymbol=o["symbol"],
                     transaction_type=o["side"], quantity=q, product="CNC",
-                    order_type="LIMIT", price=px, validity="DAY")
-                placed.append({**o, "qty": q, "limit": px, "order_id": oid, "status": "sent"})
+                    order_type="LIMIT", price=px, validity="DAY", tag=tag)
+                rec = {**rec, "order_id": oid, "status": "sent"}
             except Exception as e:                            # noqa: BLE001
-                placed.append({**o, "qty": q, "limit": px, "order_id": "",
-                               "status": f"ERROR {type(e).__name__}: {e}"})
+                rec = {**rec, "order_id": "", "status": f"ERROR {type(e).__name__}: {e}"}
+            _journal(journal, rec)                            # persist RESULT (order_id) after
+            placed.append(rec)
             sleeper(1.25)
     return placed
 
@@ -162,6 +206,7 @@ def main() -> None:
 
     orders = compute_deltas(target, holdings)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = _run_id(ts)
     here = os.path.dirname(os.path.abspath(__file__))
     total_slices = sum(len(slice_qty(o["qty"], o["ref"], a.max_slice_value)) for o in orders)
 
@@ -193,17 +238,23 @@ def main() -> None:
     phrase = f"PLACE {len(orders)} ORDERS ({total_slices} SLICES)"
     if input(f'type exactly "{phrase}" to proceed: ').strip() != phrase:
         sys.exit("confirmation mismatch - nothing placed.")
+    journal_path = os.path.join(here, f"placed_journal_{ts}.jsonl")
     try:
-        placed = place_all(kite, orders, a.band, a.max_slice_value)
+        with open(journal_path, "a", encoding="utf-8") as jf:
+            placed = place_all(kite, orders, a.band, a.max_slice_value,
+                               run_id=run_id, journal=jf)
     except Exception as e:                                    # noqa: BLE001
-        sys.exit(f"placement aborted mid-run: {type(e).__name__}: {e}")
+        sys.exit(f"placement aborted mid-run: {type(e).__name__}: {e}\n"
+                 f"  every slice's tag is journaled in {journal_path} -- run "
+                 f"kite_reconcile.py to recover any lost order_ids by tag before re-running.")
     out = os.path.join(here, f"placed_orders_{ts}.csv")
-    pd.DataFrame(placed).to_csv(out, index=False)
+    pd.DataFrame(placed).to_csv(out, index=False)             # convenience snapshot (incl. tag)
     errs = [p for p in placed if p["status"].startswith("ERROR")]
     print(f"placed {len(placed) - len(errs)}/{len(placed)} slices -> {out}")
+    print(f"crash-safe journal (tag-keyed) -> {journal_path}")
     if errs:
         print(f"!! {len(errs)} ERRORS - read {out}, then run kite_reconcile.py")
-    print(f"next: python kite_reconcile.py --intended {out}")
+    print(f"next: python kite_reconcile.py --intended {out}   (recovers lost order_ids by tag)")
 
 
 if __name__ == "__main__":

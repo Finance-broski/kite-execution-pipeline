@@ -172,6 +172,37 @@ def test_reconcile_slippage_is_side_signed():
     assert abs(rep.iloc[1]["slippage_cost_pct"] - 1.0) < 1e-6
 
 
+def test_place_all_tags_unique_and_journaled():
+    import io
+    import json as _json
+    fk = FakeKite()
+    jf = io.StringIO()
+    orders = [{"symbol": "OK", "side": "BUY", "qty": 100, "ref": 100.0}]    # -> 2 slices @ 5000 cap
+    placed = place_all(fk, orders, band=0.01, max_value=5000.0, run_id="z9",
+                       journal=jf, sleeper=lambda s: None)
+    tags = [p["tag"] for p in placed]
+    assert len(tags) == len(set(tags)) and all(len(t) <= 20 for t in tags)  # unique, <=20 chars
+    assert all(c.get("tag") == p["tag"] for c, p in zip(fk.calls, placed))  # tag IS sent on the order
+    lines = [_json.loads(x) for x in jf.getvalue().splitlines()]
+    assert len(lines) == 2 * len(placed)                                    # intent + result per slice
+    assert lines[0]["status"] == "PENDING" and lines[0]["tag"] == tags[0]   # INTENT journaled pre-place
+    assert lines[1]["status"] == "sent" and lines[1]["order_id"]            # RESULT journaled after
+
+
+def test_reconcile_recovers_by_tag_when_order_id_lost():
+    import pandas as pd
+    # the place_order RESPONSE was lost (crash): order_id empty, but tag was journaled pre-placement
+    intended = pd.DataFrame([
+        {"symbol": "A", "side": "BUY", "qty": 10, "limit": 101.0,
+         "ref": 100.0, "order_id": "", "tag": "rbz90000", "status": "PENDING"}])
+    ob = [{"order_id": "RECOVERED1", "tag": "rbz90000", "status": "COMPLETE",
+           "filled_quantity": 10, "average_price": 100.5}]
+    rep = reconcile(intended, ob)
+    assert rep.iloc[0]["verdict"] == "COMPLETE"
+    assert rep.iloc[0]["order_id"] == "RECOVERED1"          # recovered from the book by tag
+    assert bool(rep.iloc[0]["recovered_by_tag"]) is True
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -42,12 +42,22 @@ def classify(intended_qty: int, ob_row: dict | None) -> tuple:
 
 
 def reconcile(intended: pd.DataFrame, orderbook: list) -> pd.DataFrame:
-    """Join placed CSV vs Kite order book on order_id. Pure; unit-tested."""
-    ob = {str(o.get("order_id")): o for o in orderbook}
+    """Join placed orders vs the Kite order book. `order_id` is the fast in-session join key; when
+    it is missing (e.g. the place_order response was lost to a crash/disconnect), fall back to the
+    pre-assigned `tag` to RECOVER the order from the book. Pure; unit-tested."""
+    by_id = {str(o.get("order_id")): o for o in orderbook}
+    by_tag = {str(o.get("tag")): o for o in orderbook if o.get("tag")}
     rows = []
     for r in intended.itertuples():
         oid = str(r.order_id) if str(r.order_id) not in ("", "nan") else None
-        verdict, filled, avg = classify(int(r.qty), ob.get(oid))
+        tag = str(getattr(r, "tag", "")) if str(getattr(r, "tag", "")) not in ("", "nan") else None
+        ob_row = by_id.get(oid) if oid else None
+        recovered = False
+        if ob_row is None and tag and tag in by_tag:          # crash recovery: response was lost,
+            ob_row = by_tag[tag]                              # find the order by its pre-set tag
+            oid = str(ob_row.get("order_id") or "") or oid
+            recovered = True
+        verdict, filled, avg = classify(int(r.qty), ob_row)
         ref = float(r.ref)
         cost = 0.0
         if avg and ref:
@@ -55,7 +65,8 @@ def reconcile(intended: pd.DataFrame, orderbook: list) -> pd.DataFrame:
             cost = round(raw if str(r.side).upper() == "BUY" else -raw, 3)  # +ve adverse
         rows.append({"ts": datetime.now().isoformat(timespec="seconds"),
                      "symbol": r.symbol, "side": r.side, "intended_qty": int(r.qty),
-                     "limit": float(r.limit), "order_id": oid or "",
+                     "limit": float(r.limit), "order_id": oid or "", "tag": tag or "",
+                     "recovered_by_tag": recovered,
                      "verdict": verdict, "filled_qty": filled, "avg_price": avg,
                      "slippage_cost_pct": cost})
     return pd.DataFrame(rows)
